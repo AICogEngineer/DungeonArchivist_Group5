@@ -1,6 +1,6 @@
 # Dungeon Archivist: AI-Powered Game Asset Sorter
 
-**Timeline:** Dec 16, 2025 – Jan 5, 2025  
+**Timeline:** Dec 16, 2025 - Jan 5, 2025  
 **Team:** By Harsh Chavva & Koshik Mahapatra
 
 ---
@@ -74,7 +74,7 @@ Only a small labeled dataset is available at the start. The system must:
 
 - **Embedding Layer:** Flatten the image features and pass them through a dense layer to get a compact embedding of 32–64 floats per image
 
-- **Training Objective:** Classify data into the base categories  
+- **Training Objective:** Classify data into the overall category folders
   - Example: `Weapon`, `Wall`, `Humanoid`
 
 
@@ -111,7 +111,7 @@ Only a small labeled dataset is available at the start. The system must:
 
 
 ### Phase 3 - Expansion Analysis
-**Goal:** Improve model accuracy using the expanded dataset
+**Goal:** Improve the model accuracy using the expanded dataset.
 
 - Combine Dataset A with newly sorted Dataset B
 - Retrain the model using the expanded dataset
