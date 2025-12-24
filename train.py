@@ -140,15 +140,18 @@ collection = chroma_handler.collection
 #Build CNN and embedding layer
 inputs = keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3), name="image")
 
-x = layers.Conv2D(32, 3, padding="same", activation="relu", name="conv1")(inputs)
-x = layers.MaxPooling2D(name="pool1")(x)
+x = layers.Conv2D(32, (3, 3), padding="same", name="conv1")(inputs)
+x = layers.Activation("relu", name="relu1")(x)
+x = layers.MaxPooling2D((2, 2), name="pool1")(x)
 
-x = layers.Conv2D(64, 3, padding="same", activation="relu", name="conv2")(x)
-x = layers.MaxPooling2D(name="pool2")(x)
+x = layers.Conv2D(64, (3, 3), padding="same", name="conv2")(x)
+x = layers.Activation("relu", name="relu2")(x)
+x = layers.MaxPooling2D((2, 2), name="pool2")(x)
 
-x = layers.Conv2D(128, 3, padding="same", activation="relu", name="conv3")(x)
-x = layers.GlobalAveragePooling2D(name="gap")(x)
+x = layers.Conv2D(128, (3, 3), padding="same", name="conv3")(x)
+x = layers.Activation("relu", name="relu3")(x)
 
+x = layers.Flatten(name="flatten")(x)
 embedding = layers.Dense(EMBEDDING_DIM, activation=None, name="embedding")(x)
 embedding_norm = layers.LayerNormalization(name="embedding_norm")(embedding)
 
