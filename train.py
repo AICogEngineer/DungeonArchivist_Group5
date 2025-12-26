@@ -17,6 +17,7 @@ This file does NOT yet:
 """
 
 import os
+import hashlib
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
@@ -24,7 +25,7 @@ from keras import layers, models, optimizers
 import chromadb
 
 # Getting dataset: Open File Explorer, open the dataset, right click the dataset name, select Copy address as text, and paste that below
-datasetA = "C:\Harsh\Jobs\Revature\ProjectCode\GitHub\AI_ML_VibeCoding\DungeonArchivist_Group5\DungeonCrawlStoneSoupFull_Dataset"
+datasetA = os.environ.get("DATASET_A_DIR", "./DungeonCrawlStoneSoupFull_Dataset")
 
 IMG_SIZE = (32, 32)     # Image width & height (pixels)
 BATCH_SIZE = 32
@@ -114,9 +115,33 @@ class ImageSequence(tf.keras.utils.Sequence):
 train_gen = ImageSequence(train_paths, train_labels)
 val_gen = ImageSequence(val_paths, val_labels, shuffle = False) # Validation data is not shuffled
 
+inputs = layers.Input(shape = (32, 32, 3)) # 32 by 32 RGB images
+x = layers.Conv2D(32, (3, 3), activation = 'relu')(inputs) # Conv layer: 32 filters, 3x3 kernel
+x = layers.MaxPooling2D((2, 2))(x)
+x = layers.Conv2D(64, (3, 3), activation = 'relu')(x) # 64 filters, 3x3 kernel
+x = layers.MaxPooling2D((2, 2))(x)
+x = layers.Flatten()(x) # Flattening 2D feature maps to 1D vector
+embedding = layers.Dense(EMBEDDING_DIM, activation = None, name = "embedding")(x) # Embedding vector
+outputs = layers.Dense(num_classes, activation = 'softmax')(embedding)
 
+model = models.Model(inputs = inputs, outputs = outputs)
+model.compile(
+    optimizer = optimizers.Adam(learning_rate = LEARNING_RATE),
+    loss = 'sparse_categorical_crossentropy', # Sparse labels (integers)
+    metrics = ['accuracy']
+)
 
+history = model.fit(
+    train_gen,
+    validation_data = val_gen,
+    epochs = EPOCHS,
+    verbose = 1
+)
 
+embedding_model = models.Model(
+    inputs = model.input,
+    outputs = model.get_layer("embedding").output # Extracts the embedding layer
+)
 
 class ChromaDBHandler:
     def __init__(self, artifacts_dir, chroma_path, collection_name):
@@ -127,7 +152,7 @@ class ChromaDBHandler:
         self.client = chromadb.PersistentClient(path = self.chroma_path)
         self.collection = self.client.get_or_create_collection(
             name = self.collection_name,
-            metadata = {"hnsw:space": "cosine"},
+            metadata = {"hnsw:space": "cosine"}, # Cosine similarity for vectors
         )
 
 chroma_handler = ChromaDBHandler(
@@ -137,26 +162,24 @@ chroma_handler = ChromaDBHandler(
 )
 collection = chroma_handler.collection
 
-#Build CNN and embedding layer
-inputs = keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3), name="image")
+image_id = 0
+for class_name in class_names:
+    class_dir = os.path.join(datasetA, class_name)
+    for file_name in os.listdir(class_dir):
+        if not file_name.lower().endswith((".png", ".jpg", ".jpeg")):
+            continue # Skips non-image files
+        img_path = os.path.join(class_dir, file_name)
+        img_array, _ = load_image(img_path, 0)
+        img_array = np.expand_dims(img_array, axis = 0) # Add batch dimension for Keras
+        vector = embedding_model.predict(img_array, verbose = 0)[0]
 
-x = layers.Conv2D(32, (3, 3), padding="same", name="conv1")(inputs)
-x = layers.Activation("relu", name="relu1")(x)
-x = layers.MaxPooling2D((2, 2), name="pool1")(x)
+        rel_path = os.path.relpath(img_path, start = datasetA)
+        stable_id = hashlib.md5(rel_path.encode("utf-8")).hexdigest()
 
-x = layers.Conv2D(64, (3, 3), padding="same", name="conv2")(x)
-x = layers.Activation("relu", name="relu2")(x)
-x = layers.MaxPooling2D((2, 2), name="pool2")(x)
-
-x = layers.Conv2D(128, (3, 3), padding="same", name="conv3")(x)
-x = layers.Activation("relu", name="relu3")(x)
-
-x = layers.Flatten(name="flatten")(x)
-embedding = layers.Dense(EMBEDDING_DIM, activation=None, name="embedding")(x)
-embedding_norm = layers.LayerNormalization(name="embedding_norm")(embedding)
-
-x = layers.Dropout(0.2, name="dropout")(embedding_norm)
-outputs = layers.Dense(num_classes, activation="softmax", name="class_probs")(x)
-
-model = keras.Model(inputs=inputs, outputs=outputs, name="dungeon_cnn")
-model.summary()
+        collection.upsert(
+            embeddings = [vector.tolist()],
+            documents = [class_name],
+            ids = [stable_id],
+            metadatas = [{"label": class_name, "path": rel_path}] # Metadata dictionary
+        )
+        image_id += 1
