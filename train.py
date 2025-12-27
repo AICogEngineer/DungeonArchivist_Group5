@@ -20,11 +20,15 @@ import os
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-from keras import layers, models, optimizers
+from keras import layers, models, optimizers, callbacks
 import chromadb
+import hashlib
 
-# Getting dataset: Open File Explorer, open the dataset, right click the dataset name, select Copy address as text, and paste that below
-datasetA = "C:\Harsh\Jobs\Revature\ProjectCode\GitHub\AI_ML_VibeCoding\DungeonArchivist_Group5\DungeonCrawlStoneSoupFull_Dataset"
+# If this doesn't work the to get the dataset: Open File Explorer, open the dataset, right click the dataset name, select Copy address as text, and paste that below
+datasetA = os.environ.get(
+    "DATASET_A_DIR", 
+    "./DungeonCrawlStoneSoupFull_DatasetA"
+    )
 
 IMG_SIZE = (32, 32)     # Image width & height (pixels)
 BATCH_SIZE = 32
@@ -41,6 +45,7 @@ class_names = sorted([
 
 num_classes = len(class_names) 
 class_to_index = {name: idx for idx, name in enumerate(class_names)}
+
 print("Detected classes:", class_names)
 
 # Empty but will be filled in the for loop below
@@ -54,9 +59,6 @@ for class_name in class_names:
         if file_name.lower().endswith((".png", ".jpg", ".jpeg")):
             image_paths.append(os.path.join(class_dir, file_name)) # Saves full image path
             labels.append(class_to_index[class_name]) # Saves class index
-        else:
-            print(f"Skipped the incorrect file type: {file_name}") 
-            print("Correct file types include: .png, .jpg or .jpeg")
 
 # Convert lists to NumPy arrays for indexing
 image_paths = np.array(image_paths)
@@ -115,25 +117,35 @@ train_gen = ImageSequence(train_paths, train_labels)
 val_gen = ImageSequence(val_paths, val_labels, shuffle = False) # Validation data is not shuffled
 
 inputs = layers.Input(shape = (32, 32, 3)) # 32 by 32 RGB images
+
 x = layers.Conv2D(32, (3, 3), activation = 'relu')(inputs) # Conv layer: 32 filters, 3x3 kernel
 x = layers.MaxPooling2D((2, 2))(x)
 x = layers.Conv2D(64, (3, 3), activation = 'relu')(x) # 64 filters, 3x3 kernel
 x = layers.MaxPooling2D((2, 2))(x)
+
 x = layers.Flatten()(x) # Flattening 2D feature maps to 1D vector
+
 embedding = layers.Dense(EMBEDDING_DIM, activation = None, name = "embedding")(x) # Embedding vector
 outputs = layers.Dense(num_classes, activation = 'softmax')(embedding)
-
 model = models.Model(inputs = inputs, outputs = outputs)
+
 model.compile(
     optimizer = optimizers.Adam(learning_rate = LEARNING_RATE),
     loss = 'sparse_categorical_crossentropy', # Sparse labels (integers)
     metrics = ['accuracy']
 )
 
+early_stop = callbacks.EarlyStopping(
+    monitor = "val_loss",
+    patience = 3, # Stops if the val loss doesn't improve for 3 epochs
+    restore_best_weights = True # Reverts to best-performing model
+)
+
 history = model.fit(
     train_gen,
     validation_data = val_gen,
     epochs = EPOCHS,
+    callbacks = [early_stop],
     verbose = 1
 )
 
@@ -142,40 +154,48 @@ embedding_model = models.Model(
     outputs = model.get_layer("embedding").output # Extracts the embedding layer
 )
 
+embedding_model.save("./embedding_model.keras") # Actually saves the model so we can use it in archivist.py
+
 class ChromaDBHandler:
-    def __init__(self, artifacts_dir, chroma_path, collection_name):
-        self.artifacts_dir = artifacts_dir
-        self.chroma_path = chroma_path
-        self.collection_name = collection_name
-        
-        self.client = chromadb.PersistentClient(path = self.chroma_path)
+    def __init__(self, chroma_path, collection_name):
+        self.client = chromadb.PersistentClient(path = chroma_path)
         self.collection = self.client.get_or_create_collection(
-            name = self.collection_name,
-            metadata = {"hnsw:space": "cosine"}, # Cosine similarity for vectors
+            name = collection_name,
+            metadata = {"hnsw:space": "cosine"}
         )
 
 chroma_handler = ChromaDBHandler(
-    artifacts_dir = datasetA,
     chroma_path = "./chroma_db",
     collection_name = "datasetA_embeddings"
 )
+
 collection = chroma_handler.collection
 
-image_id = 0
-for class_name in class_names:
+for class_name in class_names: # Loops over each class folder
     class_dir = os.path.join(datasetA, class_name)
     for file_name in os.listdir(class_dir):
         if not file_name.lower().endswith((".png", ".jpg", ".jpeg")):
             continue # Skips non-image files
+
         img_path = os.path.join(class_dir, file_name)
         img_array, _ = load_image(img_path, 0)
-        img_array = np.expand_dims(img_array, axis = 0) # Add batch dimension for Keras
-        vector = embedding_model.predict(img_array, verbose = 0)[0]
+        img_array = np.expand_dims(img_array, axis = 0) # Expands dims because Keras models expect batch input
 
-        collection.add(
-            embeddings = [vector.tolist()],
+        vector = embedding_model.predict(img_array, verbose = 0)[0] # Generates the embedding vector for the image
+
+        # Create a stable, repeatable ID for the image
+            # Stable ID ensures re-runs overwrite instead of duplicating
+        rel_path = os.path.relpath(img_path, start = datasetA)
+        stable_id = hashlib.md5(rel_path.encode("utf-8")).hexdigest() # Using the relative path ensures the same image gets the same ID across multiple runs, preventing duplicate entries
+        
+        vector = vector.astype(np.float32)
+
+        collection.upsert( # Store / update the image embedding in ChromaDB
+            embeddings = [vector.tolist()], # Numerical vector for similarity search
             documents = [class_name],
-            ids = [f"img_{image_id}"],
-            metadatas = [{"label": class_name}] # Metadata dictionary
+            ids = [stable_id],
+            metadatas = [{ # Extra info for retrieval and debugging
+                "label": class_name, 
+                "path": rel_path # The relative path to the image file
+                }]
         )
-        image_id += 1
