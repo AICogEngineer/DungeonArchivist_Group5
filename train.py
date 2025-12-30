@@ -37,42 +37,35 @@ LEARNING_RATE = 0.003   # Step size for gradient updates
 EMBEDDING_DIM = 64      # Size of the learned feature vector
 VALIDATION_SPLIT = 0.2  # 80/20 train/validation split
 
-# Each subfolder name becomes a class label
-class_names = sorted([
-    d for d in os.listdir(datasetA)
-    if os.path.isdir(os.path.join(datasetA, d))
-])
+# Collects images recursively
+image_paths = [] # Stores full paths to all images
+hierarchy_labels = [] # Stores full relative folder paths
 
-num_classes = len(class_names) 
-class_to_index = {name: idx for idx, name in enumerate(class_names)}
+# Walk through Dataset A recursively (level 1, 2, 3, ...)
+for root, _, files in os.walk(datasetA):                     # CHANGED: recursive scan
+    for file in files:
+        if file.lower().endswith((".png", ".jpg", ".jpeg")):
+            image_paths.append(os.path.join(root, file))     # Store image path
+            hierarchy_labels.append(
+                os.path.relpath(root, datasetA)              # Store FULL hierarchy path
+            )
 
-print("Detected classes:", class_names)
+class_names = sorted(set(hierarchy_labels)) # Create a sorted list of unique hierarchical class names
+class_to_index = {name: i for i, name in enumerate(class_names)} # Map each hierarchical class to a numeric index
+labels = np.array([class_to_index[l] for l in hierarchy_labels]) # Convert hierarchy labels to numeric labels
+image_paths = np.array(image_paths) # Convert image paths to NumPy array for indexing
 
-# Empty but will be filled in the for loop below
-image_paths = []
-labels = []
-
-# Collects image file paths and their numeric class labels, instead of loading images immediately, to  load them efficiently later
-for class_name in class_names:
-    class_dir = os.path.join(datasetA, class_name)
-    for file_name in os.listdir(class_dir): # Iterate over files inside the class folder
-        if file_name.lower().endswith((".png", ".jpg", ".jpeg")):
-            image_paths.append(os.path.join(class_dir, file_name)) # Saves full image path
-            labels.append(class_to_index[class_name]) # Saves class index
-
-# Convert lists to NumPy arrays for indexing
-image_paths = np.array(image_paths)
-labels = np.array(labels)
+print(f"Detected {len(class_names)} hierarchical classes")
 
 # Shuffles the data once using a fixed seed so results are repeatable
 SEED = 42
 rng = np.random.default_rng(SEED)
-indices = rng.permutation(len(image_paths)) # Generate shuffled indices
+indices = rng.permutation(len(image_paths)) # Generates the shuffled indices
 image_paths = image_paths[indices]
 labels = labels[indices]
 
 # Train / validation split
-split_index = int(len(image_paths) * (1 - VALIDATION_SPLIT))
+split_index = int(len(image_paths) * (1 - VALIDATION_SPLIT)) # Finds the split index
 train_paths, val_paths = image_paths[:split_index], image_paths[split_index:]
 train_labels, val_labels = labels[:split_index], labels[split_index:]
 
@@ -82,23 +75,21 @@ def load_image(path, label):
     image = tf.image.resize(image, IMG_SIZE) # Images resized to 32 by 32
     image = image / 255.0  # Normalize pixel values to [0, 1]
 
-    return image, label
+    return image, label # Label unused here; required only for training pipeline
 
 class ImageSequence(tf.keras.utils.Sequence):
-    def __init__(self, paths, labels, batch_size = BATCH_SIZE, shuffle = True):
+    def __init__(self, paths, labels, shuffle = True):
         self.paths = paths # List of file paths to images
         self.labels = labels
-        self.batch_size = batch_size
         self.shuffle = shuffle # Determines whether to shuffle at end of epoch
-        self.indices = np.arange(len(self.paths)) # Array of indices for shuffling
-        if shuffle:
-            np.random.shuffle(self.indices) # First shuffle
+        self.indices = np.arange(len(paths)) # Array of indices for shuffling
+        self.on_epoch_end()
 
     def __len__(self):
-        return int(np.ceil(len(self.paths) / self.batch_size)) # Returns number of batches per epoch
+        return int(np.ceil(len(self.paths) / BATCH_SIZE)) # Returns number of batches per epoch
 
     def __getitem__(self, idx): # Generate one batch of data
-        batch_indices = self.indices[idx * self.batch_size:(idx + 1) * self.batch_size] # Select indices for this batch
+        batch_indices = self.indices[idx * BATCH_SIZE:(idx + 1) * BATCH_SIZE] # Select indices for this batch
         batch_x, batch_y = [], []
 
         for i in batch_indices:
@@ -118,16 +109,15 @@ val_gen = ImageSequence(val_paths, val_labels, shuffle = False) # Validation dat
 
 inputs = layers.Input(shape = (32, 32, 3)) # 32 by 32 RGB images
 
-x = layers.Conv2D(32, (3, 3), activation = 'relu')(inputs) # Conv layer: 32 filters, 3x3 kernel
-x = layers.MaxPooling2D((2, 2))(x)
-x = layers.Conv2D(64, (3, 3), activation = 'relu')(x) # 64 filters, 3x3 kernel
-x = layers.MaxPooling2D((2, 2))(x)
-
+x = layers.Conv2D(32, 3, activation = 'relu')(inputs) # Conv layer: 32 filters, 3x3 kernel
+x = layers.MaxPooling2D()(x)
+x = layers.Conv2D(64, 3, activation = 'relu')(x) # 64 filters, 3x3 kernel
+x = layers.MaxPooling2D()(x)
 x = layers.Flatten()(x) # Flattening 2D feature maps to 1D vector
 
-embedding = layers.Dense(EMBEDDING_DIM, activation = None, name = "embedding")(x) # Embedding vector
-outputs = layers.Dense(num_classes, activation = 'softmax')(embedding)
-model = models.Model(inputs = inputs, outputs = outputs)
+embedding = layers.Dense(EMBEDDING_DIM, name = "embedding")(x) # Embedding vector
+outputs = layers.Dense(len(class_names), activation = 'softmax')(embedding)
+model = models.Model(inputs, outputs)
 
 model.compile(
     optimizer = optimizers.Adam(learning_rate = LEARNING_RATE),
@@ -135,13 +125,14 @@ model.compile(
     metrics = ['accuracy']
 )
 
+# Early stopping to prevent overfitting
 early_stop = callbacks.EarlyStopping(
     monitor = "val_loss",
     patience = 3, # Stops if the val loss doesn't improve for 3 epochs
     restore_best_weights = True # Reverts to best-performing model
 )
 
-history = model.fit(
+model.fit( # Training the model
     train_gen,
     validation_data = val_gen,
     epochs = EPOCHS,
@@ -156,46 +147,33 @@ embedding_model = models.Model(
 
 embedding_model.save("./embedding_model.keras") # Actually saves the model so we can use it in archivist.py
 
-class ChromaDBHandler:
-    def __init__(self, chroma_path, collection_name):
-        self.client = chromadb.PersistentClient(path = chroma_path)
-        self.collection = self.client.get_or_create_collection(
-            name = collection_name,
-            metadata = {"hnsw:space": "cosine"}
-        )
+client = chromadb.PersistentClient("./chroma_db")
 
-chroma_handler = ChromaDBHandler(
-    chroma_path = "./chroma_db",
-    collection_name = "datasetA_embeddings"
+collection = client.get_or_create_collection(
+    name = "datasetA_embeddings",
+    metadata = {"hnsw:space": "cosine"}
 )
 
-collection = chroma_handler.collection
+for path, label_idx in zip(image_paths, labels):
+    img, _ = load_image(path, 0)
+    img = np.expand_dims(img, axis = 0) # Expands dims because Keras models expect batch input
 
-for class_name in class_names: # Loops over each class folder
-    class_dir = os.path.join(datasetA, class_name)
-    for file_name in os.listdir(class_dir):
-        if not file_name.lower().endswith((".png", ".jpg", ".jpeg")):
-            continue # Skips non-image files
+    vector = embedding_model.predict(img, verbose = 0)[0].astype(np.float32) # Generates the embedding vector for the image
 
-        img_path = os.path.join(class_dir, file_name)
-        img_array, _ = load_image(img_path, 0)
-        img_array = np.expand_dims(img_array, axis = 0) # Expands dims because Keras models expect batch input
+    # Create a stable, repeatable ID for the image
+        # Stable ID ensures re-runs overwrite instead of duplicating
+    rel_path = os.path.relpath(path, datasetA) # The full relative image path
+    stable_id = hashlib.md5(rel_path.encode()).hexdigest() # Using the relative path ensures the same image gets the same ID across multiple runs, preventing duplicate entries
 
-        vector = embedding_model.predict(img_array, verbose = 0)[0] # Generates the embedding vector for the image
+    collection.upsert( # Store / update the image embedding in ChromaDB
+        embeddings = [vector.tolist()], # Numerical vector for similarity search
+        ids = [stable_id],
+        metadatas = [{
+            "label": class_names[label_idx], # The full hierarchy label
+            "path": rel_path # The relative path to the image file
+        }]
+    )
 
-        # Create a stable, repeatable ID for the image
-            # Stable ID ensures re-runs overwrite instead of duplicating
-        rel_path = os.path.relpath(img_path, start = datasetA)
-        stable_id = hashlib.md5(rel_path.encode("utf-8")).hexdigest() # Using the relative path ensures the same image gets the same ID across multiple runs, preventing duplicate entries
-        
-        vector = vector.astype(np.float32)
-
-        collection.upsert( # Store / update the image embedding in ChromaDB
-            embeddings = [vector.tolist()], # Numerical vector for similarity search
-            documents = [class_name],
-            ids = [stable_id],
-            metadatas = [{ # Extra info for retrieval and debugging
-                "label": class_name, 
-                "path": rel_path # The relative path to the image file
-                }]
-        )
+# Just so there is some kind of results printed at the end of training
+final_val_acc = max(model.history.history["val_accuracy"])
+print(f"\nBest validation accuracy: {final_val_acc:.4f}")

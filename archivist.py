@@ -27,15 +27,14 @@ datasetB = os.environ.get(
 
 # Output folders
 restored_dir = "./Restored_Archive" # Where classified images will be moved, if model is confident
-review_pile = "./Review_Pile" # Where images go if the model isn't confident enough to label them
+review_pile = "./Review_Pile" # Where images go if the model is uncertain about the results
 
 IMG_SIZE = (32, 32) # Must match the training image size in train.py
 k = 5 # Number of nearest neighbors to check
-threshold = 0.35 # Confidence cutoff (lower = stricter)
+threshold = 0.35 # Confidence cutoff (Cosine distance: lower = more similar, higher = less confident)
 
 def load_image(path):
     image = tf.io.read_file(path)
-
     image = tf.image.decode_image( # Decodes the image bytes into a tensor (RGB image)
         image,
         channels = 3,
@@ -47,90 +46,78 @@ def load_image(path):
 
     return image
 
-class ChromaDBHandler:
-    def __init__(self, chroma_path, collection_name):
-        self.client = chromadb.PersistentClient(path = chroma_path) # Connects to the persistent vector database
-
-        self.collection = self.client.get_or_create_collection( # Loads or creates the collection storing the Dataset A embeddings
-            name = collection_name,
-            metadata = {"hnsw:space": "cosine"}  # Cosine similarity for vectors
-            )
-
 class Archivist:
-    def __init__(self, model_path, chroma_handler):
-        self.embedding_model = models.load_model(model_path)
-        self.collection = chroma_handler.collection # Gets the ChromaDB collection
+    def __init__(self):
+        self.model = models.load_model("./embedding_model.keras") # Loads the embedding model
+        self.client = chromadb.PersistentClient("./chroma_db") # Connect to the vector DB
+        self.collection = self.client.get_or_create_collection(
+            "datasetA_embeddings"
+        )
+
+        # Initialize counters for final results
+        self.total_images = 0
+        self.restored_images = 0
+        self.review_images = 0
+        self.distances = []
 
         # Makes sure the output folders actually exist
         os.makedirs(restored_dir, exist_ok = True)
         os.makedirs(review_pile, exist_ok = True)
 
     def embed_image(self, image_path):
-        img = load_image(image_path)
-        img = tf.expand_dims(img, axis = 0) # Adds a batch dimension because Keras wants it
-        vector = self.embedding_model.predict(img, verbose = 0)[0] # Generates the embedding vector
+        img = tf.expand_dims(load_image(image_path), axis = 0) # Adds a batch dimension because Keras wants it
 
-        return vector.astype(np.float32)
+        return self.model.predict(img, verbose = 0)[0].astype(np.float32) # Generates the embedding vector
 
-    def query_db(self, vector):
-        return self.collection.query( # Asks ChromaDB for the closest stored embeddings
-            query_embeddings = [vector.tolist()],
-            n_results = k,
-            include = ["metadatas", "distances"]
-            )
+    def process(self):
+        for root, _, files in os.walk(datasetB): # Recursive scan of Dataset B to find all images
+            for file in files:
+                if not file.lower().endswith((".png", ".jpg", ".jpeg")): # Skips non-image files
+                    continue
 
-    def decide_label(self, results):
-        distances = results["distances"][0]
-        metadatas = results["metadatas"][0]
+                self.total_images += 1 # Counts total processed images
+                src_path = os.path.join(root, file) # Builds the full file path to the image
 
-        if distances[0] > threshold: # If the closest match is still too far away, reject it
-            return None  # Will go to review pile
+                vector = self.embed_image(src_path) # Converts the image into an embedding vector
 
-        # Weighted voting, so the closer neighbors count more
-        votes = {}
-        for meta, dist in zip(metadatas, distances):
-            label = meta["label"]
-            weight = 1.0 / (dist + 1e-6)
-            votes[label] = votes.get(label, 0.0) + weight
+                results = self.collection.query( # Asks ChromaDB to find the k closest embeddings
+                    query_embeddings = [vector.tolist()],
+                    n_results = k,
+                    include = ["metadatas", "distances"]
+                )
 
-        return max(votes, key = votes.get) # Returns the label with the strongest vote
+                best_distance = results["distances"][0][0] # Finds the distance to the closest known image
+                self.distances.append(best_distance) # Saves the distance for statistics summary at the end
 
-    def move_file(self, src_path, label):
-        if label is None: # Decides destination folder
-            dst_dir = review_pile  # Not confident -> review pile
-        else:
-            dst_dir = os.path.join(restored_dir, label)
+                if best_distance > threshold: # If similarity is too low, sends images to the review pile
+                    shutil.move(src_path, os.path.join(review_pile, file))
+                    self.review_images += 1
+                else: # Restores images to predicted category folder
+                    rel_label = results["metadatas"][0][0]["label"]
 
-        os.makedirs(dst_dir, exist_ok = True) # Create folder if it does not exist
+                    dst_dir = os.path.join(restored_dir, rel_label) # Creates the destination folders if they don’t already exist
+                    os.makedirs(dst_dir, exist_ok = True)
 
-        dst_path = os.path.join(dst_dir, os.path.basename(src_path))
-        shutil.move(src_path, dst_path) # Moves the file to its new location
+                    shutil.move(src_path, os.path.join(dst_dir, file)) # Moves images to its restored location
+                    self.restored_images += 1
 
-    def main(self, datasetB_path):
-        for file_name in os.listdir(datasetB_path): # Main loop that processes every file in Dataset B
-            if not file_name.lower().endswith((".png", ".jpg", ".jpeg")): # Skip files that are not images
-                continue  # Ignore non-image files
+        self.print_results()
 
-            img_path = os.path.join(datasetB_path, file_name)
+    def print_results(self):
+        print("\n   ARCHIVIST RESULTS SUMMARY")
+        print(f"In total processed: {self.total_images} images")
+        print(f"In total sent {self.restored_images} images to the Restored Archive")
+        print(f"In total sent {self.review_images} images to the Review Pile")
+        print(f"\nClassification coverage: {(self.restored_images / self.total_images) * 100:.2f}%") # Percentage of images confidently classified
+        print(f"Review rate: {(self.review_images / self.total_images) * 100:.2f}%") # Percentage of images flagged for manual review
+        print(
+            f"Avg NN distance: {np.mean(self.distances):.4f}"
+            " (average similarity distance to nearest known image)"
+        )
 
-            vector = self.embed_image(img_path)
-            results = self.query_db(vector) # Finds the similar images in ChromaDB
-            label = self.decide_label(results) # Decides the final label using similarity logic
-
-            self.move_file(img_path, label) # Moves the file to the appropriate folder
-
-            status = label if label else "Review"
-            print(f"[Archived] {file_name} -> {status}")
-
-if __name__ == "__main__":
-    chroma_handler = ChromaDBHandler(
-        chroma_path = "./chroma_db",
-        collection_name = "datasetA_embeddings"
-    )
-
-    archivist = Archivist(
-        model_path = "./embedding_model.keras",
-        chroma_handler = chroma_handler
-    )
-
-    archivist.main(datasetB)
+# Runs the archivist when the script is executed directly
+try:
+    if __name__ == "__main__":
+        Archivist().process()
+except ZeroDivisionError:
+    print("\nThere's NOTHING to sort, your Dataset is empty.")
