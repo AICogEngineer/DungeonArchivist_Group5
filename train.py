@@ -9,14 +9,11 @@ Purpose:
 - Extract compact embedding vectors from the trained model
 - Store embeddings in a vector database (ChromaDB) for similarity search
 
-This file does NOT yet:
-- Touch Dataset B
-- Move or delete files
-- Perform predictions on unknown data
-
 """
 
 import os
+# Suppresses TensorFlow and libpng warnings that are not relevant to model training. These warnings come from the image metadata (iCCP profiles) and do not affect the model learning
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
@@ -78,7 +75,9 @@ def load_image(path, label):
     return image, label # Label unused here; required only for training pipeline
 
 class ImageSequence(tf.keras.utils.Sequence):
-    def __init__(self, paths, labels, shuffle = True):
+    def __init__(self, paths, labels, shuffle = True, **kwargs):
+        super().__init__(**kwargs)  # To avoid the PyDataset warning this is required by Keras
+
         self.paths = paths # List of file paths to images
         self.labels = labels
         self.shuffle = shuffle # Determines whether to shuffle at end of epoch
@@ -111,8 +110,10 @@ inputs = layers.Input(shape = (32, 32, 3)) # 32 by 32 RGB images
 
 x = layers.Conv2D(32, 3, activation = 'relu')(inputs) # Conv layer: 32 filters, 3x3 kernel
 x = layers.MaxPooling2D()(x)
+# If you see overfitting add dropout here
 x = layers.Conv2D(64, 3, activation = 'relu')(x) # 64 filters, 3x3 kernel
 x = layers.MaxPooling2D()(x)
+# If you see overfitting add dropout here
 x = layers.Flatten()(x) # Flattening 2D feature maps to 1D vector
 
 embedding = layers.Dense(EMBEDDING_DIM, name = "embedding")(x) # Embedding vector

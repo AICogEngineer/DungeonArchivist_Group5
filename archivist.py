@@ -12,6 +12,9 @@ Purpose:
 """
 
 import os
+# Suppresses the TensorFlow INFO logs and oneDNN messages (doesn't affect the code's correctness)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 import shutil # to move files across folders
 import numpy as np
 import tensorflow as tf
