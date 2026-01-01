@@ -38,13 +38,13 @@ k = 5 # Number of nearest neighbors to check
 threshold = 0.35 # Confidence cutoff (Cosine distance: lower = more similar, higher = less confident)
 
 # Sets up TensorBoard
-log_dir = os.path.join(
+log_dir = os.path.join( # Creates a unique log directory per run so graphs don’t overwrite
     "logs", # Root logging directory
     "archivist", # Project-specific subfolder
-    datetime.datetime.now().strftime("%Y%m%d-%H%M%S") # Unique ID
-) # In terminal run: tensorboard --logdir=logs/archivist
+    datetime.datetime.now().strftime("%Y%m%d-%H%M%S") # To make a unique log directory with timestamp
+) # After running the file, in terminal run: tensorboard --logdir=logs/archivist
 
-summary_writer = tf.summary.create_file_writer(log_dir) # Creates a TensorBoard writer that will store performance metrics
+summary_writer = tf.summary.create_file_writer(log_dir) # Creates a TensorBoard writer that will log per-image metrics
 
 def load_image(path):
     image = tf.io.read_file(path)
@@ -102,6 +102,20 @@ class Archivist:
                 best_distance = results["distances"][0][0] # Finds the distance to the closest known image
                 self.distances.append(best_distance) # Saves the distance for statistics summary at the end
 
+                # Per-image TensorBoard logging, so TensorBoard makes graphs instead of just plotting dots
+                with summary_writer.as_default():
+                    tf.summary.scalar(
+                        "nn_distance",
+                        best_distance,
+                        step = self.total_images
+                    )
+                    tf.summary.scalar(
+                        "processed_images",
+                        self.total_images,
+                        step = self.total_images
+                    )
+
+                # The decision logic
                 if best_distance > threshold: # If similarity is too low, sends images to the review pile
                     shutil.move(src_path, os.path.join(review_pile, file))
                     self.review_images += 1
@@ -114,6 +128,7 @@ class Archivist:
                     shutil.move(src_path, os.path.join(dst_dir, file)) # Moves images to its restored location
                     self.restored_images += 1
 
+        # Logs the final metrics once processing is complete
         self.log_tensorboard_metrics()
         self.print_results()
 
@@ -146,6 +161,7 @@ class Archivist:
 # Runs the archivist when the script is executed directly
 try:
     if __name__ == "__main__":
-        Archivist().process()
+        Archivist().process() 
 except ZeroDivisionError:
     print("\nThere's NOTHING to sort, your Dataset is empty.")
+# After running the file, in terminal run: tensorboard --logdir=logs/archivist
