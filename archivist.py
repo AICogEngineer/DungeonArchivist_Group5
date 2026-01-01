@@ -21,6 +21,7 @@ import tensorflow as tf
 from tensorflow import keras
 from keras import models
 import chromadb
+import datetime # Used to timestamp each run so TensorBoard logs from different executions do not overwrite each other
 
 # Getting dataset do below or if that doesn't work: Open File Explorer, open the dataset, right click the dataset name, select Copy address as text, and paste that below
 datasetB = os.environ.get(
@@ -35,6 +36,15 @@ review_pile = "./Review_Pile" # Where images go if the model is uncertain about 
 IMG_SIZE = (32, 32) # Must match the training image size in train.py
 k = 5 # Number of nearest neighbors to check
 threshold = 0.35 # Confidence cutoff (Cosine distance: lower = more similar, higher = less confident)
+
+# Sets up TensorBoard
+log_dir = os.path.join(
+    "logs", # Root logging directory
+    "archivist", # Project-specific subfolder
+    datetime.datetime.now().strftime("%Y%m%d-%H%M%S") # Unique ID
+) # In terminal run: tensorboard --logdir=logs/archivist
+
+summary_writer = tf.summary.create_file_writer(log_dir) # Creates a TensorBoard writer that will store performance metrics
 
 def load_image(path):
     image = tf.io.read_file(path)
@@ -104,13 +114,28 @@ class Archivist:
                     shutil.move(src_path, os.path.join(dst_dir, file)) # Moves images to its restored location
                     self.restored_images += 1
 
+        self.log_tensorboard_metrics()
         self.print_results()
+
+    # Logs final performance metrics to TensorBoard
+    def log_tensorboard_metrics(self):
+        coverage_rate = self.restored_images / self.total_images # Percentage of images confidently classified
+        review_rate = self.review_images / self.total_images # Percentage of images sent for manual review
+        avg_distance = float(np.mean(self.distances)) # Average cosine distance to nearest known embedding (Lower values are better since it means a higher similarity)
+
+        with summary_writer.as_default():
+            tf.summary.scalar("coverage_rate", coverage_rate, step = 0) # How much of Dataset B was successfully restored
+            tf.summary.scalar("review_rate", review_rate, step = 0) # How often the model was uncertain
+            tf.summary.scalar("avg_nn_distance", avg_distance, step = 0) # Overall embedding similarity quality
+            tf.summary.scalar("processed_images", self.total_images, step = 0) # Total number of images processed in this run
+
+            summary_writer.flush() # Ensures data is visible when you open TensorBoard
 
     def print_results(self):
         print("\n   ARCHIVIST RESULTS SUMMARY")
         print(f"In total processed: {self.total_images} images")
-        print(f"In total sent {self.restored_images} images to the Restored Archive")
-        print(f"In total sent {self.review_images} images to the Review Pile")
+        print(f"Sent {self.restored_images} images to the Restored Archive")
+        print(f"Sent {self.review_images} images to the Review Pile")
         print(f"\nClassification coverage: {(self.restored_images / self.total_images) * 100:.2f}%") # Percentage of images confidently classified
         print(f"Review rate: {(self.review_images / self.total_images) * 100:.2f}%") # Percentage of images flagged for manual review
         print(
