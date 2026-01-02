@@ -107,50 +107,50 @@ class Archivist:
 
                 vector = self.embed_image(src_path) # Converts the image into an embedding vector
 
-                results = self.collection.query( # Asks ChromaDB to find the k closest embeddings
-                    query_embeddings = [vector.tolist()],
-                    n_results = k,
+                # Query ChromaDB to find the k most similar embeddings from Dataset A
+                results = self.collection.query(
+                    query_embeddings = [vector.tolist()], # Converts the NumPy embedding into a plain list and sends it as the query vector to ChromaDB
+                    n_results = k, # Asks ChromaDB to return the k nearest neighbors
                     include = ["metadatas", "distances"]
                 )
 
-                distances = results["distances"][0] # All k distances
-                labels = [meta["label"] for meta in results["metadatas"][0]] # All k labels
+                distances = results["distances"][0] # Gets the list of distances for all k neighbors
+                labels = [meta["label"] for meta in results["metadatas"][0]] # Pulls the "label" field from each metadata object
 
-                avg_distance = float(np.mean(distances)) # Aggregate confidence
-                self.distances.append(avg_distance)
+                avg_distance = float(np.mean(distances)) # Finds the average distance across all k neighbors
+                self.distances.append(avg_distance) 
 
                 # Confidence Check
-                if avg_distance > threshold:
-                    shutil.move(
+                if avg_distance > threshold: # If the distance is too high (average similarity is too weak), the model is not confident enough to auto-label the image
+                    shutil.move( # Moves the image to the review pile for manual review
                         src_path,
                         os.path.join(review_pile, file)
                     )
                     self.review_images += 1
                     continue
 
-                # Majority (Weighted) Voting
-                label_votes = Counter(labels) # Counts the label frequency
-                final_label = label_votes.most_common(1)[0][0]
+                # Majority (K-NN) Voting
+                label_votes = Counter(labels) # Counts the label frequency (how many times each label appears among the k neighbors)
+                final_label = label_votes.most_common(1)[0][0] # Selects the label with the highest vote count
 
-                # To make labeling automatic
-                dst_dir = os.path.join(restored_dir, final_label)
-                os.makedirs(dst_dir, exist_ok = True)
+                dst_dir = os.path.join(restored_dir, final_label) # Builds the destination directory using the predicted label
+                os.makedirs(dst_dir, exist_ok = True) # Creates the label folder if it does not already exist
 
-                shutil.move(
+                shutil.move( # Moves the image into its predicted label folder
                     src_path,
-                    os.path.join(dst_dir, file)
+                    os.path.join(dst_dir, file) # The final restored destination
                 )
 
                 self.restored_images += 1
 
                 # Per-image TensorBoard logging, so TensorBoard makes graphs instead of just plotting dots
-                with summary_writer.as_default():
-                    tf.summary.scalar(
+                with summary_writer.as_default(): # Logs metrics so TensorBoard can visualize model behavior over time
+                    tf.summary.scalar( # Logs the average k-NN distance for this image
                         f"{dataset_name} / nn_distance", # To make it easier to read since there are multiple datasets
                         avg_distance,
-                        step = self.total_images
+                        step = self.total_images # X-axis value in TensorBoard
                     )
-                    tf.summary.scalar(
+                    tf.summary.scalar( # Logs how many images have been processed so far
                         f"{dataset_name} / processed_images",
                         self.total_images,
                         step = self.total_images
