@@ -16,12 +16,14 @@ import os
 # Suppresses the TensorFlow INFO logs and oneDNN messages (doesn't affect the code's correctness)
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
 import shutil # to move files across folders
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from keras import models
 import chromadb
+from collections import Counter # Used for majority voting
 import datetime # Used to timestamp each run so TensorBoard logs from different executions do not overwrite each other
 
 # Dataset B (Random dataset)
@@ -32,10 +34,10 @@ datasetB = os.environ.get(
 )
 
 # Dataset C (Unknown dataset) is a local clone of a GitHub repo
-    # First run: git clone https://github.com/ai/dataset_c.git
+    # First run: git clone https://github.com/AICogEngineer/dataset_c.git
 datasetC = os.environ.get(
     "DATASET_C_DIR",
-    "./dataset_c"   # The local repo path
+    "./dataset_c" # The local repo path after git cloning it
 )
 
 # Output folders
@@ -111,14 +113,41 @@ class Archivist:
                     include = ["metadatas", "distances"]
                 )
 
-                best_distance = results["distances"][0][0] # Finds the distance to the closest known image
-                self.distances.append(best_distance) # Saves the distance for statistics summary at the end
+                distances = results["distances"][0] # All k distances
+                labels = [meta["label"] for meta in results["metadatas"][0]] # All k labels
+
+                avg_distance = float(np.mean(distances)) # Aggregate confidence
+                self.distances.append(avg_distance)
+
+                # Confidence Check
+                if avg_distance > threshold:
+                    shutil.move(
+                        src_path,
+                        os.path.join(review_pile, file)
+                    )
+                    self.review_images += 1
+                    continue
+
+                # Majority (Weighted) Voting
+                label_votes = Counter(labels) # Counts the label frequency
+                final_label = label_votes.most_common(1)[0][0]
+
+                # To make labeling automatic
+                dst_dir = os.path.join(restored_dir, final_label)
+                os.makedirs(dst_dir, exist_ok = True)
+
+                shutil.move(
+                    src_path,
+                    os.path.join(dst_dir, file)
+                )
+
+                self.restored_images += 1
 
                 # Per-image TensorBoard logging, so TensorBoard makes graphs instead of just plotting dots
                 with summary_writer.as_default():
                     tf.summary.scalar(
                         f"{dataset_name} / nn_distance", # To make it easier to read since there are multiple datasets
-                        best_distance,
+                        avg_distance,
                         step = self.total_images
                     )
                     tf.summary.scalar(
@@ -126,25 +155,6 @@ class Archivist:
                         self.total_images,
                         step = self.total_images
                     )
-
-                # The decision logic
-                if best_distance > threshold: # If similarity is too low, sends images to the review pile
-                    shutil.move(
-                        src_path, 
-                        os.path.join(review_pile, file)
-                    )
-                    self.review_images += 1
-                else: # Restores images to predicted category folder
-                    rel_label = results["metadatas"][0][0]["label"]
-
-                    dst_dir = os.path.join(restored_dir, rel_label) # Creates the destination folders if they don’t already exist
-                    os.makedirs(dst_dir, exist_ok = True)
-
-                    shutil.move( # Moves images to its restored location
-                        src_path, 
-                        os.path.join(dst_dir, file)
-                    )
-                    self.restored_images += 1
 
     def process(self): # Runs the datasets
         self.process_dataset(datasetB, "dataset_B")
@@ -173,8 +183,8 @@ class Archivist:
         print(f"In total processed: {self.total_images} images")
         print(f"Sent {self.restored_images} images to the Restored Archive")
         print(f"Sent {self.review_images} images to the Review Pile")
-        print(f"\nClassification coverage: {(self.restored_images / self.total_images) * 100:.2f}%") # Percentage of images confidently classified
-        print(f"Review rate: {(self.review_images / self.total_images) * 100:.2f}%") # Percentage of images flagged for manual review
+        print(f"\nConfidently classified coverage: {(self.restored_images / self.total_images) * 100:.2f}%") # Percentage of images confidently classified
+        print(f"Flagged for manual review rate: {(self.review_images / self.total_images) * 100:.2f}%") # Percentage of images flagged for manual review
         print(
             f"Avg NN distance: {np.mean(self.distances):.4f}"
             " (average similarity distance to nearest known image)"
