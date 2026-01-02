@@ -4,7 +4,8 @@
 ARCHIVIST.PY — PHASE 2: THE RESTORATION ENGINE
 
 Purpose:
-- Scan an unlabeled folder (Dataset B / "Data Swamp")
+- Scan & Sort an unlabeled folder (Dataset B / "Data Swamp")
+- Scan & Sort an unknown dataset (Dataset C) from a GitHub repository
 - Convert each image into an embedding using the trained vision model
 - Query ChromaDB for nearest neighbors
 - Decide a label using similarity + voting
@@ -23,10 +24,18 @@ from keras import models
 import chromadb
 import datetime # Used to timestamp each run so TensorBoard logs from different executions do not overwrite each other
 
-# Getting dataset do below or if that doesn't work: Open File Explorer, open the dataset, right click the dataset name, select Copy address as text, and paste that below
+# Dataset B (Random dataset)
+    # Getting dataset do below or if that doesn't work: Open File Explorer, open the dataset, right click the dataset name, select Copy address as text, and paste that below
 datasetB = os.environ.get(
     "DATASET_B_DIR",
     "./ChaosData_DatasetB"
+)
+
+# Dataset C (Unknown dataset) is a local clone of a GitHub repo
+    # First run: git clone https://github.com/ai/dataset_c.git
+datasetC = os.environ.get(
+    "DATASET_C_DIR",
+    "./dataset_c"   # The local repo path
 )
 
 # Output folders
@@ -82,8 +91,11 @@ class Archivist:
 
         return self.model.predict(img, verbose = 0)[0].astype(np.float32) # Generates the embedding vector
 
-    def process(self):
-        for root, _, files in os.walk(datasetB): # Recursive scan of Dataset B to find all images
+    # Processes a dataset folder by finding images, embedding them, querying them in ChromaDB, and sorting them into the restored or review folders so that way it works with both dataset B & C
+    def process_dataset(self, dataset_path, dataset_name): # Changed parameters so it works with both dataset B & C
+        print(f"\nProcessing {dataset_name} . . . ") # For user reference
+
+        for root, _, files in os.walk(dataset_path): # Recursive scan of the dataset's path to find all images
             for file in files:
                 if not file.lower().endswith((".png", ".jpg", ".jpeg")): # Skips non-image files
                     continue
@@ -105,19 +117,22 @@ class Archivist:
                 # Per-image TensorBoard logging, so TensorBoard makes graphs instead of just plotting dots
                 with summary_writer.as_default():
                     tf.summary.scalar(
-                        "nn_distance",
+                        f"{dataset_name} / nn_distance", # To make it easier to read since there are multiple datasets
                         best_distance,
                         step = self.total_images
                     )
                     tf.summary.scalar(
-                        "processed_images",
+                        f"{dataset_name} / processed_images",
                         self.total_images,
                         step = self.total_images
                     )
 
                 # The decision logic
                 if best_distance > threshold: # If similarity is too low, sends images to the review pile
-                    shutil.move(src_path, os.path.join(review_pile, file))
+                    shutil.move(
+                        src_path, 
+                        os.path.join(review_pile, file)
+                    )
                     self.review_images += 1
                 else: # Restores images to predicted category folder
                     rel_label = results["metadatas"][0][0]["label"]
@@ -125,8 +140,15 @@ class Archivist:
                     dst_dir = os.path.join(restored_dir, rel_label) # Creates the destination folders if they don’t already exist
                     os.makedirs(dst_dir, exist_ok = True)
 
-                    shutil.move(src_path, os.path.join(dst_dir, file)) # Moves images to its restored location
+                    shutil.move( # Moves images to its restored location
+                        src_path, 
+                        os.path.join(dst_dir, file)
+                    )
                     self.restored_images += 1
+
+    def process(self): # Runs the datasets
+        self.process_dataset(datasetB, "dataset_B")
+        self.process_dataset(datasetC, "dataset_C")
 
         # Logs the final metrics once processing is complete
         self.log_tensorboard_metrics()
