@@ -12,6 +12,7 @@ Purpose:
 """
 
 import os
+import datetime
 # Suppresses TensorFlow and libpng warnings that are not relevant to model training. These warnings come from the image metadata (iCCP profiles) and do not affect the model learning
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 import numpy as np
@@ -132,6 +133,19 @@ model.compile(
     metrics = ['accuracy']
 )
 
+# Create unique log directory with timestamp
+log_dir = os.path.join("logs", "fit", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+os.makedirs(log_dir, exist_ok = True)
+
+tensorboard_callback = callbacks.TensorBoard(
+    log_dir = log_dir,
+    histogram_freq = 1,
+    write_graph = True,
+    write_images = False,
+    update_freq = "epoch",
+    profile_batch = 0
+)
+
 # Early stopping to prevent overfitting
 early_stop = callbacks.EarlyStopping(
     monitor = "val_loss",
@@ -143,7 +157,7 @@ model.fit( # Training the model
     train_gen,
     validation_data = val_gen,
     epochs = EPOCHS,
-    callbacks = [early_stop],
+    callbacks = [early_stop, tensorboard_callback],
     verbose = 1
 )
 
