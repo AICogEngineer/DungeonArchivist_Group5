@@ -50,12 +50,6 @@ for root, _, files in os.walk(datasetA):                     # CHANGED: recursiv
                 continue
             hierarchy_labels.append(top)
 
-from collections import Counter
-print("\nTop-level label counts:")
-counts = Counter(hierarchy_labels)
-for label, count in counts.most_common():
-    print(f"{label:20s}  {count}")
-
 class_names = sorted(set(hierarchy_labels)) # Create a sorted list of unique hierarchical class names
 class_to_index = {name: i for i, name in enumerate(class_names)} # Map each hierarchical class to a numeric index
 labels = np.array([class_to_index[l] for l in hierarchy_labels]) # Convert hierarchy labels to numeric labels
@@ -75,11 +69,18 @@ split_index = int(len(image_paths) * (1 - VALIDATION_SPLIT)) # Finds the split i
 train_paths, val_paths = image_paths[:split_index], image_paths[split_index:]
 train_labels, val_labels = labels[:split_index], labels[split_index:]
 
+
 def load_image(path, label):
-    image = tf.io.read_file(path) # Reads the image
-    image = tf.image.decode_image(image, channels = 3, expand_animations = False) # Decodes image as RGB
+    image_bytes = tf.io.read_file(path) # Reads the image
+    image = tf.image.decode_image(image_bytes, channels = 4, expand_animations = False) # Decodes image as RGBA so transparency is handled correctly
     image = tf.image.resize(image, IMG_SIZE) # Images resized to 32 by 32
-    image = image / 255.0  # Normalize pixel values to [0, 1]
+
+    rgb = tf.cast(image[..., :3], tf.float32) / 255.0 # Normalizes RGB pixel values to [0, 1]
+    alpha = tf.cast(image[..., 3:4], tf.float32) / 255.0 # Alpha channel in [0, 1]
+
+    # Composites transparent pixels onto a white background so sprites are consistent
+    bg = tf.ones_like(rgb)
+    image = rgb * alpha + bg * (1.0 - alpha)
 
     return image, label # Label unused here; required only for training pipeline
 
