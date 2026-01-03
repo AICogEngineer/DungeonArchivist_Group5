@@ -44,9 +44,17 @@ for root, _, files in os.walk(datasetA):                     # CHANGED: recursiv
     for file in files:
         if file.lower().endswith((".png", ".jpg", ".jpeg")):
             image_paths.append(os.path.join(root, file))     # Store image path
-            hierarchy_labels.append(
-                os.path.relpath(root, datasetA)              # Store FULL hierarchy path
-            )
+            rel = os.path.relpath(root, datasetA)
+            top = rel.split(os.sep)[0] if rel != "." else None
+            if top is None:
+                continue
+            hierarchy_labels.append(top)
+
+from collections import Counter
+print("\nTop-level label counts:")
+counts = Counter(hierarchy_labels)
+for label, count in counts.most_common():
+    print(f"{label:20s}  {count}")
 
 class_names = sorted(set(hierarchy_labels)) # Create a sorted list of unique hierarchical class names
 class_to_index = {name: i for i, name in enumerate(class_names)} # Map each hierarchical class to a numeric index
@@ -113,17 +121,18 @@ x = layers.Conv2D(32, 3, padding="same")(inputs) # Conv layer: 32 filters, 3x3 k
 x = layers.BatchNormalization()(x)
 x = layers.Activation("relu")(x)
 x = layers.MaxPooling2D()(x)
-# If you see overfitting add dropout here
+
 x = layers.Conv2D(64, 3, padding="same")(x) # 64 filters, 3x3 kernel
 x = layers.BatchNormalization()(x)
 x = layers.Activation("relu")(x)
 x = layers.MaxPooling2D()(x)
-# If you see overfitting add dropout here
-x = layers.Flatten()(x) # Flattening 2D feature maps to 1D vector
+
+x = layers.GlobalAveragePooling2D()(x)
 x = layers.Dropout(0.3)(x)
 
 embedding = layers.Dense(EMBEDDING_DIM, name = "embedding")(x) # Embedding vector
 embedding = layers.Dropout(0.2)(embedding)
+
 outputs = layers.Dense(len(class_names), activation = 'softmax')(embedding)
 model = models.Model(inputs, outputs)
 
