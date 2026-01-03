@@ -108,15 +108,21 @@ val_gen = ImageSequence(val_paths, val_labels, shuffle = False) # Validation dat
 
 inputs = layers.Input(shape = (32, 32, 3)) # 32 by 32 RGB images
 
-x = layers.Conv2D(32, 3, activation = 'relu')(inputs) # Conv layer: 32 filters, 3x3 kernel
+x = layers.Conv2D(32, 3, padding="same")(inputs) # Conv layer: 32 filters, 3x3 kernel
+x = layers.BatchNormalization()(x)
+x = layers.Activation("relu")(x)
 x = layers.MaxPooling2D()(x)
 # If you see overfitting add dropout here
-x = layers.Conv2D(64, 3, activation = 'relu')(x) # 64 filters, 3x3 kernel
+x = layers.Conv2D(64, 3, padding="same")(x) # 64 filters, 3x3 kernel
+x = layers.BatchNormalization()(x)
+x = layers.Activation("relu")(x)
 x = layers.MaxPooling2D()(x)
 # If you see overfitting add dropout here
 x = layers.Flatten()(x) # Flattening 2D feature maps to 1D vector
+x = layers.Dropout(0.3)(x)
 
 embedding = layers.Dense(EMBEDDING_DIM, name = "embedding")(x) # Embedding vector
+embedding = layers.Dropout(0.2)(embedding)
 outputs = layers.Dense(len(class_names), activation = 'softmax')(embedding)
 model = models.Model(inputs, outputs)
 
