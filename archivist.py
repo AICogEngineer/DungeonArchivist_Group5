@@ -188,7 +188,7 @@ class Archivist:
                     self.send_to_review(src_path, file)
                     continue
 
-                if best / sum(sorted_votes.values()) < label_str_ratio:
+                if best / sum(vote_scores.values()) < label_str_ratio:
                     self.send_to_review(src_path, file)
                     continue
 

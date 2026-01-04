@@ -7,7 +7,6 @@ Purpose:
 - Train a CNN on labeled 32 by 32 game assets (Dataset A)
 - Extract compact embedding vectors from the trained model
 - Store normalized embeddings in a vector database (ChromaDB) for cosine similarity search
-
 """
 
 import os
