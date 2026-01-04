@@ -26,7 +26,7 @@ import hashlib
 datasetA = os.environ.get(
     "DATASET_A_DIR", 
     "./DungeonCrawlStoneSoupFull_DatasetA"
-    )
+)
 
 IMG_SIZE = (32, 32)     # Image width & height (pixels)
 BATCH_SIZE = 32
@@ -35,27 +35,65 @@ LEARNING_RATE = 0.003   # Step size for gradient updates
 EMBEDDING_DIM = 64      # Size of the learned feature vector
 VALIDATION_SPLIT = 0.2  # 80/20 train/validation split
 
-# Collects images recursively
-image_paths = [] # Stores full paths to all images
-hierarchy_labels = [] # Stores full relative folder paths
+# Class label map from dataset A's hierarchy
+class_map = {
+    "dungeon": [
+        "altars","grass","sigils","gateways","shops","statues","traps",
+        "trees","vaults","abyss","banners","torches","water"
+    ],
+    "effect": ["effect"],
+    "emissary": ["emissaries"],
+    "gui": [
+        "abilities","commands","invocations","skills","air","components",
+        "conjuration","disciplines","divination","earth","enchantment",
+        "fire","ice","monster","necromancy","poison","summoning",
+        "translocation","transmutation","startup","tabs"
+    ],
+    "item": [
+        "amulet","armor","book","food","gold","runes","ring","rod",
+        "scroll","staff","wand","weapon","artefact","ranged"
+    ],
+    "misc": ["blood","brands","numbers"],
+    "monster": [
+        "aberration","abyss","amorphous","animals","aquatic","demons",
+        "demonspawn","draconic","dragons","eyes","fungi_plants","holy",
+        "nonliving","panlord","spriggan","statues","tentacles",
+        "undead","unique","vault"
+    ],
+    "player": [
+        "barding","base","beard","body","boots","cloak","draconic",
+        "enchantment","felids","gloves","hair","halo","hand_left",
+        "hand_right","heads","legs","mutations","transform"
+    ]
+}
 
-# Walk through Dataset A recursively (level 1, 2, 3, ...)
-for root, _, files in os.walk(datasetA):                     # CHANGED: recursive scan
+def map_to_parent(folder_name):
+    for parent, children in class_map.items():
+        if folder_name in children:
+            return parent
+    return None
+
+# Collects images
+image_paths = [] # Stores full paths to all images
+hierarchy_labels = [] # Stores parent class labels derived from folder structure
+
+# Walk through Dataset A
+for root, _, files in os.walk(datasetA):
     for file in files:
         if file.lower().endswith((".png", ".jpg", ".jpeg")):
-            image_paths.append(os.path.join(root, file))     # Store image path
             rel = os.path.relpath(root, datasetA)
             top = rel.split(os.sep)[0] if rel != "." else None
-            if top is None:
-                continue
-            hierarchy_labels.append(top)
+            parent_class = map_to_parent(top)
+            if parent_class:
+                image_paths.append(os.path.join(root, file)) # Stores image path
+                hierarchy_labels.append(parent_class)
 
-class_names = sorted(set(hierarchy_labels)) # Create a sorted list of unique hierarchical class names
+class_names = sorted(set(hierarchy_labels)) # Unique parent-level class names
 class_to_index = {name: i for i, name in enumerate(class_names)} # Map each hierarchical class to a numeric index
 labels = np.array([class_to_index[l] for l in hierarchy_labels]) # Convert hierarchy labels to numeric labels
 image_paths = np.array(image_paths) # Convert image paths to NumPy array for indexing
 
-print(f"Detected {len(class_names)} hierarchical classes")
+print(f"Detected {len(class_names)} class-level labels")
 
 # Shuffles the data once using a fixed seed so results are repeatable
 SEED = 42
@@ -66,13 +104,14 @@ labels = labels[indices]
 
 # Train / validation split
 split_index = int(len(image_paths) * (1 - VALIDATION_SPLIT)) # Finds the split index
-train_paths, val_paths = image_paths[:split_index], image_paths[split_index:]
-train_labels, val_labels = labels[:split_index], labels[split_index:]
-
+train_paths = image_paths[:split_index]
+val_paths = image_paths[split_index:]
+train_labels = labels[:split_index]
+val_labels = labels[split_index:]
 
 def load_image(path, label):
     image_bytes = tf.io.read_file(path) # Reads the image
-    image = tf.image.decode_image(image_bytes, channels = 4, expand_animations = False) # Decodes image as RGBA so transparency is handled correctly
+    image = tf.image.decode_image(image_bytes, channels = 4, expand_animations = False) # Decodes image as RGBA and ignores animations like GIFs
     image = tf.image.resize(image, IMG_SIZE) # Images resized to 32 by 32
 
     rgb = tf.cast(image[..., :3], tf.float32) / 255.0 # Normalizes RGB pixel values to [0, 1]
@@ -82,7 +121,7 @@ def load_image(path, label):
     bg = tf.ones_like(rgb)
     image = rgb * alpha + bg * (1.0 - alpha)
 
-    return image, label # Label unused here; required only for training pipeline
+    return image, label # Label passed through for training
 
 class ImageSequence(tf.keras.utils.Sequence):
     def __init__(self, paths, labels, shuffle = True, **kwargs):
@@ -99,14 +138,14 @@ class ImageSequence(tf.keras.utils.Sequence):
 
     def __getitem__(self, idx): # Generate one batch of data
         batch_indices = self.indices[idx * BATCH_SIZE:(idx + 1) * BATCH_SIZE] # Select indices for this batch
-        batch_x, batch_y = [], []
+        x, y = [], []
 
         for i in batch_indices:
             img, label = load_image(self.paths[i], self.labels[i])
-            batch_x.append(img)
-            batch_y.append(label)
+            x.append(img)
+            y.append(label)
 
-        return np.array(batch_x), np.array(batch_y) # Convert lists to NumPy arrays for keras
+        return np.array(x), np.array(y) # Convert lists to NumPy arrays for keras
 
     def on_epoch_end(self):
         if self.shuffle:
@@ -118,12 +157,16 @@ val_gen = ImageSequence(val_paths, val_labels, shuffle = False) # Validation dat
 
 inputs = layers.Input(shape = (32, 32, 3)) # 32 by 32 RGB images
 
-x = layers.Conv2D(32, 3, padding="same")(inputs) # Conv layer: 32 filters, 3x3 kernel
+x = layers.RandomFlip("horizontal")(inputs)
+x = layers.RandomRotation(0.3)(x) # so it is trained on images that are rotated 
+x = layers.RandomZoom(0.2)(x) # so it is trained on images that are zoomed in
+
+x = layers.Conv2D(32, 3, padding = "same")(x) # Conv layer: 32 filters, 3x3 kernel
 x = layers.BatchNormalization()(x)
 x = layers.Activation("relu")(x)
 x = layers.MaxPooling2D()(x)
 
-x = layers.Conv2D(64, 3, padding="same")(x) # 64 filters, 3x3 kernel
+x = layers.Conv2D(64, 3, padding = "same")(x) # 64 filters, 3x3 kernel
 x = layers.BatchNormalization()(x)
 x = layers.Activation("relu")(x)
 x = layers.MaxPooling2D()(x)
@@ -204,7 +247,7 @@ for path, label_idx in zip(image_paths, labels):
         embeddings = [vector.tolist()], # Numerical vector for similarity search
         ids = [stable_id],
         metadatas = [{
-            "label": class_names[label_idx], # The full hierarchy label
+            "label": class_names[label_idx], # The parent class label
             "path": rel_path # The relative path to the image file
         }]
     )

@@ -22,8 +22,7 @@ import tensorflow as tf
 from tensorflow import keras
 from keras import models
 import chromadb
-from collections import Counter # Used for majority voting
-import datetime # Used to timestamp each run so TensorBoard logs from different executions do not overwrite each other
+import datetime # Used to timestamp TensorBoard log directories
 from collections import defaultdict # For weighted voting accumulation
 
 # Dataset B (Random dataset)
@@ -34,7 +33,7 @@ datasetB = os.environ.get(
 )
 
 # Dataset C (Unknown dataset) is a local clone of a GitHub repo
-    # First run: git clone https://github.com/AICogEngineer/dataset_c.git
+    # Before each run: git clone https://github.com/AICogEngineer/dataset_c.git
 datasetC = os.environ.get(
     "DATASET_C_DIR",
     "./dataset_c" # The local repo path after git cloning it
@@ -46,8 +45,10 @@ review_pile = "./Review_Pile" # Where images go if the model is uncertain about 
 
 IMG_SIZE = (32, 32) # Must match the training image size in train.py
 k = 5 # Number of nearest neighbors to check
-threshold = 0.35 # Max average cosine distance allowed (Cosine distance: lower = more similar vectors, higher = less confident)
-label_str = 0.6 # Label must represent >= 60% of vote strength, to prevent labeling when results are ambiguous
+threshold = 0.35 # Max average cosine distance and rejects globally weak matches (0 = identical, higher = less similar)
+                    # ChromaDB returns cosine distance because embeddings are L2-normalized
+label_str_ratio = 0.6 # Represents >= 60% of vote strength and prevents split-vote ambiguity
+margin_threshold = 0.15 # The margin is to prevent near-tie false confidence
 
 # Sets up TensorBoard
 log_dir = os.path.join( # Creates a unique log directory per run so graphs don’t overwrite
@@ -60,13 +61,17 @@ summary_writer = tf.summary.create_file_writer(log_dir) # Creates a TensorBoard 
 
 def load_image(path):
     image_bytes = tf.io.read_file(path)
-    image = tf.image.decode_image( # Decodes the image bytes into a tensor (RGBA image so transparency is handled correctly)
+    image = tf.image.decode_image( # Force RGBA so alpha handling is consistent even if source image lacks transparency
         image_bytes,
         channels = 4,
         expand_animations = False
     )
     image = tf.image.resize(image, IMG_SIZE) # Resizes the image to 32 by 32 so it matches the model input
-    image = image / 255.0
+    # In train.py I composited alpha onto white so I have to do that here too
+    rgb = tf.cast(image[..., :3], tf.float32) / 255.0
+    alpha = tf.cast(image[..., 3:4], tf.float32) / 255.0
+    bg = tf.ones_like(rgb)
+    image = rgb * alpha + bg * (1.0 - alpha)
 
     return image
 
@@ -94,7 +99,9 @@ class Archivist:
         vector = self.model.predict(img, verbose = 0)[0].astype(np.float32) # Generates the embedding vector from the CNN
 
         # Normalizes embedding for correct cosine similarity
-        vector = vector / np.linalg.norm(vector)  # Without this, distances would be inconsistent
+        norm = np.linalg.norm(vector) # This normalization is different from train.py because this is safer since here we may have to worry that images could be fully transparent, single-color or corrupted
+        if norm > 0:
+            vector /= norm  # Without this, distances would be inconsistent
 
         return vector
     
@@ -112,7 +119,7 @@ class Archivist:
         shutil.move(src_path, dst_path)
         self.restored_images += 1
     
-    # Handles Confusing Files
+    # Handles Uncertain / Low-Confidence Files
     def send_to_review(self, src_path, file):
         os.makedirs(review_pile, exist_ok = True) # Makes sure the review directory exists before moving files into it
         dst_path = os.path.join(review_pile, file)
@@ -125,10 +132,14 @@ class Archivist:
         self.review_images += 1
 
     # Processes a dataset folder by finding images, embedding them, querying them in ChromaDB, and sorting them into the restored or review folders so that way it works with both dataset B & C
-    def process_dataset(self, dataset_path, dataset_name): # Changed parameters so it works with both dataset B & C
+    def process_dataset(self, dataset_path, dataset_name): # Walks dataset recursively, embeds each image, queries Dataset A and decides whether to go with the restore or manual review folder
         print(f"\nProcessing {dataset_name} . . . ") # For user reference
 
         for root, _, files in os.walk(dataset_path): # Recursive scan of the dataset's path to find all images
+            root = os.path.abspath(root)
+            if root.startswith(os.path.abspath(restored_dir)) or root.startswith(os.path.abspath(review_pile)): # Normalize paths to avoid reprocessing on Windows due to path separator differences
+                continue
+            
             for file in files:
                 if not file.lower().endswith((".png", ".jpg", ".jpeg")): # Skips non-image files
                     continue
@@ -159,26 +170,31 @@ class Archivist:
                 # Weighted K-NN Voting
                 vote_scores = defaultdict(float) # Accumulates weighted votes per label
 
-                for label, dist in zip(labels, distances): # zip() pairs each label with its distance
+                for rank, (label, dist) in enumerate(zip(labels, distances)): # zip() pairs each label with its distance
+                    weight = (1 / (dist + 1e-6)) * (1 / (rank + 1)) # Combines semantic similarity (distance) and neighbor reliability (rank)
                     # Closer neighbors contribute to more of the vote weight
-                    vote_scores[label] += 1 / (dist + 1e-6) # 1e-6 prevents division by zero from happening
+                    vote_scores[label] += weight
 
-                final_label, top_score = max(
-                    vote_scores.items(),
-                    key = lambda x: x[1]
-                )
+                sorted_votes = sorted(vote_scores.items(), key = lambda x: x[1], reverse = True)
 
-                total_score = sum(vote_scores.values())
-                str_ratio = top_score / total_score # Measures confidence
-
-                # 2nd Confidence Check to check prevent ambiguous labeling
-                if str_ratio < label_str: # If winning label is not stronger, the model is confused then it is sent to human review
+                if len(sorted_votes) < 2:
                     self.send_to_review(src_path, file)
                     continue
 
-                self.restore_file(src_path, file, final_label) # If all confidence checks pass, restore file
+                (best_label, best), (_, second) = sorted_votes[:2]
 
-                # Per-image TensorBoard logging, so TensorBoard makes graphs instead of just plotting dots
+                # 2nd confidence check to prevent ambiguous labeling
+                if best - second < margin_threshold: # edge case
+                    self.send_to_review(src_path, file)
+                    continue
+
+                if best / sum(sorted_votes.values()) < label_str_ratio:
+                    self.send_to_review(src_path, file)
+                    continue
+
+                self.restore_file(src_path, file, best_label) # If all confidence checks pass, restore file
+
+                # TensorBoard logging allows post-run analysis of model confidence trends
                 with summary_writer.as_default(): # Logs metrics so TensorBoard can visualize model behavior over time
                     tf.summary.scalar( # Logs the average k-NN distance for this image
                         f"{dataset_name} / nn_distance", # To make it easier to read since there are multiple datasets
@@ -191,7 +207,7 @@ class Archivist:
                         step = self.total_images
                     )
 
-    def process(self): # Runs the datasets
+    def process(self): # Entry point that processes all unlabeled datasets sequentially
         self.process_dataset(datasetB, "dataset_B")
         self.process_dataset(datasetC, "dataset_C")
 
