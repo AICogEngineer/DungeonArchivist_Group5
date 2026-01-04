@@ -4,9 +4,8 @@
 ARCHIVIST.PY — PHASE 2: THE RESTORATION ENGINE
 
 Purpose:
-- Scan & Sort an unlabeled folder (Dataset B / "Data Swamp")
-- Scan & Sort an unknown dataset (Dataset C) from a GitHub repository
-- Convert each image into an embedding using the trained vision model
+- Takes the unlabeled images (from Dataset B & Dataset C)
+- Convert each image into an embedding using the trained CNN
 - Query ChromaDB for nearest neighbors
 - Decide a label using similarity + voting
 - Move files into restored folders or a review pile
@@ -14,8 +13,8 @@ Purpose:
 
 import os
 # Suppresses the TensorFlow INFO logs and oneDNN messages (doesn't affect the code's correctness)
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2" # Suppresses unnecessary TensorFlow logs
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0" # Prevents CPU-specific warnings
 
 import shutil # to move files across folders
 import numpy as np
@@ -25,6 +24,7 @@ from keras import models
 import chromadb
 from collections import Counter # Used for majority voting
 import datetime # Used to timestamp each run so TensorBoard logs from different executions do not overwrite each other
+from collections import defaultdict # For weighted voting accumulation
 
 # Dataset B (Random dataset)
     # Getting dataset do below or if that doesn't work: Open File Explorer, open the dataset, right click the dataset name, select Copy address as text, and paste that below
@@ -46,7 +46,8 @@ review_pile = "./Review_Pile" # Where images go if the model is uncertain about 
 
 IMG_SIZE = (32, 32) # Must match the training image size in train.py
 k = 5 # Number of nearest neighbors to check
-threshold = 0.35 # Confidence cutoff (Cosine distance: lower = more similar, higher = less confident)
+threshold = 0.35 # Max average cosine distance allowed (Cosine distance: lower = more similar vectors, higher = less confident)
+label_str = 0.6 # Label must represent >= 60% of vote strength, to prevent labeling when results are ambiguous
 
 # Sets up TensorBoard
 log_dir = os.path.join( # Creates a unique log directory per run so graphs don’t overwrite
@@ -64,16 +65,15 @@ def load_image(path):
         channels = 3,
         expand_animations = False
     )
-
     image = tf.image.resize(image, IMG_SIZE) # Resizes the image to 32 by 32 so it matches the model input
-    image = image / 255.0
+    image = image / 255.0 
 
     return image
 
 class Archivist:
     def __init__(self):
         self.model = models.load_model("./embedding_model.keras") # Loads the embedding model
-        self.client = chromadb.PersistentClient("./chroma_db") # Connect to the vector DB
+        self.client = chromadb.PersistentClient("./chroma_db") # Connect to the persistent vector DB (ChromaDB) instance
         self.collection = self.client.get_or_create_collection(
             "datasetA_embeddings"
         )
@@ -82,7 +82,7 @@ class Archivist:
         self.total_images = 0
         self.restored_images = 0
         self.review_images = 0
-        self.distances = []
+        self.distances = [] # To track similarity quality across all images
 
         # Makes sure the output folders actually exist
         os.makedirs(restored_dir, exist_ok = True)
@@ -91,7 +91,38 @@ class Archivist:
     def embed_image(self, image_path):
         img = tf.expand_dims(load_image(image_path), axis = 0) # Adds a batch dimension because Keras wants it
 
-        return self.model.predict(img, verbose = 0)[0].astype(np.float32) # Generates the embedding vector
+        vector = self.model.predict(img, verbose = 0)[0].astype(np.float32) # Generates the embedding vector from the CNN
+
+        # Normalizes embedding for correct cosine similarity
+        vector = vector / np.linalg.norm(vector)  # Without this, distances would be inconsistent
+
+        return vector
+    
+    # Handles Confidently Classified Files
+    def restore_file(self, src_path, file, label):
+        dst_dir = os.path.join(restored_dir, label) # Makes the destination directory path
+        os.makedirs(dst_dir, exist_ok = True) # Creates the label folder if it doesn’t exist (prevents errors on first use)
+
+        dst_path = os.path.join(dst_dir, file) # Creates the destination file path for the image
+
+        if os.path.exists(dst_path): 
+            file = f"{datetime.datetime.now().timestamp()}_{file}" # Adds a timestamp prefix to ensure the filename is unique and prevents overwriting
+            dst_path = os.path.join(dst_dir, file) # Remakes the destination path using the new unique filename
+
+        shutil.move(src_path, dst_path)
+        self.restored_images += 1
+    
+    # Handles Confusing Files
+    def send_to_review(self, src_path, file):
+        os.makedirs(review_pile, exist_ok = True) # Makes sure the review directory exists before moving files into it
+        dst_path = os.path.join(review_pile, file)
+ 
+        if os.path.exists(dst_path): # Prevents overwriting if the same file name already exists in the review pile
+            file = f"{datetime.datetime.now().timestamp()}_{file}" # Appends a timestamp to create a unique filename
+            dst_path = os.path.join(review_pile, file)
+
+        shutil.move(src_path, dst_path)
+        self.review_images += 1
 
     # Processes a dataset folder by finding images, embedding them, querying them in ChromaDB, and sorting them into the restored or review folders so that way it works with both dataset B & C
     def process_dataset(self, dataset_path, dataset_name): # Changed parameters so it works with both dataset B & C
@@ -122,26 +153,30 @@ class Archivist:
 
                 # Confidence Check
                 if avg_distance > threshold: # If the distance is too high (average similarity is too weak), the model is not confident enough to auto-label the image
-                    shutil.move( # Moves the image to the review pile for manual review
-                        src_path,
-                        os.path.join(review_pile, file)
-                    )
-                    self.review_images += 1
+                    self.send_to_review(src_path, file)
                     continue
 
-                # Majority (K-NN) Voting
-                label_votes = Counter(labels) # Counts the label frequency (how many times each label appears among the k neighbors)
-                final_label = label_votes.most_common(1)[0][0] # Selects the label with the highest vote count
+                # Weighted K-NN Voting
+                vote_scores = defaultdict(float) # Accumulates weighted votes per label
 
-                dst_dir = os.path.join(restored_dir, final_label) # Builds the destination directory using the predicted label
-                os.makedirs(dst_dir, exist_ok = True) # Creates the label folder if it does not already exist
+                for label, dist in zip(labels, distances): # zip() pairs each label with its distance
+                    # Closer neighbors contribute to more of the vote weight
+                    vote_scores[label] += 1 / (dist + 1e-6) # 1e-6 prevents division by zero from happening
 
-                shutil.move( # Moves the image into its predicted label folder
-                    src_path,
-                    os.path.join(dst_dir, file) # The final restored destination
+                final_label, top_score = max(
+                    vote_scores.items(),
+                    key = lambda x: x[1]
                 )
 
-                self.restored_images += 1
+                total_score = sum(vote_scores.values())
+                str_ratio = top_score / total_score # Measures confidence
+
+                # 2nd Confidence Check to check prevent ambiguous labeling
+                if str_ratio < label_str: # If winning label is not stronger, the model is confused then it is sent to human review
+                    self.send_to_review(src_path, file)
+                    continue
+
+                self.restore_file(src_path, file, final_label) # If all confidence checks pass, restore file
 
                 # Per-image TensorBoard logging, so TensorBoard makes graphs instead of just plotting dots
                 with summary_writer.as_default(): # Logs metrics so TensorBoard can visualize model behavior over time

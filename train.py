@@ -4,16 +4,16 @@
 PHASE 1: THE VISION MODEL (DATASET A)
 
 Purpose:
-- Teach the model what different game assets look like using labeled data (Dataset A)
-- Train a CNN classifier on 32 by 32 images
+- Train a CNN on labeled 32 by 32 game assets (Dataset A)
 - Extract compact embedding vectors from the trained model
-- Store embeddings in a vector database (ChromaDB) for similarity search
+- Store normalized embeddings in a vector database (ChromaDB) for cosine similarity search
 
 """
 
 import os
 # Suppresses TensorFlow and libpng warnings that are not relevant to model training. These warnings come from the image metadata (iCCP profiles) and do not affect the model learning
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
@@ -152,7 +152,7 @@ client = chromadb.PersistentClient("./chroma_db")
 
 collection = client.get_or_create_collection(
     name = "datasetA_embeddings",
-    metadata = {"hnsw:space": "cosine"}
+    metadata = {"hnsw:space": "cosine"} # cosine similarity
 )
 
 for path, label_idx in zip(image_paths, labels):
@@ -160,6 +160,10 @@ for path, label_idx in zip(image_paths, labels):
     img = np.expand_dims(img, axis = 0) # Expands dims because Keras models expect batch input
 
     vector = embedding_model.predict(img, verbose = 0)[0].astype(np.float32) # Generates the embedding vector for the image
+
+    # Normalizes embedding for correct cosine similarity
+    vector = vector / np.linalg.norm(vector)  # Makes sure comparisons are fair distances
+                    # np.linalg.norm(vector) computes the length (magnitude) of the vector, in this case the above line of code scales the vector so its length becomes exactly 1 for vector normalization.
 
     # Create a stable, repeatable ID for the image
         # Stable ID ensures re-runs overwrite instead of duplicating
