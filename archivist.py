@@ -59,14 +59,14 @@ log_dir = os.path.join( # Creates a unique log directory per run so graphs donâ€
 summary_writer = tf.summary.create_file_writer(log_dir) # Creates a TensorBoard writer that will log per-image metrics
 
 def load_image(path):
-    image = tf.io.read_file(path)
-    image = tf.image.decode_image( # Decodes the image bytes into a tensor (RGB image)
-        image,
-        channels = 3,
+    image_bytes = tf.io.read_file(path)
+    image = tf.image.decode_image( # Decodes the image bytes into a tensor (RGBA image so transparency is handled correctly)
+        image_bytes,
+        channels = 4,
         expand_animations = False
     )
     image = tf.image.resize(image, IMG_SIZE) # Resizes the image to 32 by 32 so it matches the model input
-    image = image / 255.0 
+    image = image / 255.0
 
     return image
 

@@ -11,6 +11,7 @@ Purpose:
 """
 
 import os
+import datetime
 # Suppresses TensorFlow and libpng warnings that are not relevant to model training. These warnings come from the image metadata (iCCP profiles) and do not affect the model learning
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
@@ -43,9 +44,11 @@ for root, _, files in os.walk(datasetA):                     # CHANGED: recursiv
     for file in files:
         if file.lower().endswith((".png", ".jpg", ".jpeg")):
             image_paths.append(os.path.join(root, file))     # Store image path
-            hierarchy_labels.append(
-                os.path.relpath(root, datasetA)              # Store FULL hierarchy path
-            )
+            rel = os.path.relpath(root, datasetA)
+            top = rel.split(os.sep)[0] if rel != "." else None
+            if top is None:
+                continue
+            hierarchy_labels.append(top)
 
 class_names = sorted(set(hierarchy_labels)) # Create a sorted list of unique hierarchical class names
 class_to_index = {name: i for i, name in enumerate(class_names)} # Map each hierarchical class to a numeric index
@@ -66,11 +69,18 @@ split_index = int(len(image_paths) * (1 - VALIDATION_SPLIT)) # Finds the split i
 train_paths, val_paths = image_paths[:split_index], image_paths[split_index:]
 train_labels, val_labels = labels[:split_index], labels[split_index:]
 
+
 def load_image(path, label):
-    image = tf.io.read_file(path) # Reads the image
-    image = tf.image.decode_image(image, channels = 3, expand_animations = False) # Decodes image as RGB
+    image_bytes = tf.io.read_file(path) # Reads the image
+    image = tf.image.decode_image(image_bytes, channels = 4, expand_animations = False) # Decodes image as RGBA so transparency is handled correctly
     image = tf.image.resize(image, IMG_SIZE) # Images resized to 32 by 32
-    image = image / 255.0  # Normalize pixel values to [0, 1]
+
+    rgb = tf.cast(image[..., :3], tf.float32) / 255.0 # Normalizes RGB pixel values to [0, 1]
+    alpha = tf.cast(image[..., 3:4], tf.float32) / 255.0 # Alpha channel in [0, 1]
+
+    # Composites transparent pixels onto a white background so sprites are consistent
+    bg = tf.ones_like(rgb)
+    image = rgb * alpha + bg * (1.0 - alpha)
 
     return image, label # Label unused here; required only for training pipeline
 
@@ -108,15 +118,22 @@ val_gen = ImageSequence(val_paths, val_labels, shuffle = False) # Validation dat
 
 inputs = layers.Input(shape = (32, 32, 3)) # 32 by 32 RGB images
 
-x = layers.Conv2D(32, 3, activation = 'relu')(inputs) # Conv layer: 32 filters, 3x3 kernel
+x = layers.Conv2D(32, 3, padding="same")(inputs) # Conv layer: 32 filters, 3x3 kernel
+x = layers.BatchNormalization()(x)
+x = layers.Activation("relu")(x)
 x = layers.MaxPooling2D()(x)
-# If you see overfitting add dropout here
-x = layers.Conv2D(64, 3, activation = 'relu')(x) # 64 filters, 3x3 kernel
+
+x = layers.Conv2D(64, 3, padding="same")(x) # 64 filters, 3x3 kernel
+x = layers.BatchNormalization()(x)
+x = layers.Activation("relu")(x)
 x = layers.MaxPooling2D()(x)
-# If you see overfitting add dropout here
-x = layers.Flatten()(x) # Flattening 2D feature maps to 1D vector
+
+x = layers.GlobalAveragePooling2D()(x)
+x = layers.Dropout(0.3)(x)
 
 embedding = layers.Dense(EMBEDDING_DIM, name = "embedding")(x) # Embedding vector
+embedding = layers.Dropout(0.2)(embedding)
+
 outputs = layers.Dense(len(class_names), activation = 'softmax')(embedding)
 model = models.Model(inputs, outputs)
 
@@ -124,6 +141,19 @@ model.compile(
     optimizer = optimizers.Adam(learning_rate = LEARNING_RATE),
     loss = 'sparse_categorical_crossentropy', # Sparse labels (integers)
     metrics = ['accuracy']
+)
+
+# Create unique log directory with timestamp
+log_dir = os.path.join("logs", "fit", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+os.makedirs(log_dir, exist_ok = True)
+
+tensorboard_callback = callbacks.TensorBoard(
+    log_dir = log_dir,
+    histogram_freq = 1,
+    write_graph = True,
+    write_images = False,
+    update_freq = "epoch",
+    profile_batch = 0
 )
 
 # Early stopping to prevent overfitting
@@ -137,7 +167,7 @@ model.fit( # Training the model
     train_gen,
     validation_data = val_gen,
     epochs = EPOCHS,
-    callbacks = [early_stop],
+    callbacks = [early_stop, tensorboard_callback],
     verbose = 1
 )
 
