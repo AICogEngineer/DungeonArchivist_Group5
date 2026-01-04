@@ -227,7 +227,7 @@ class Archivist:
             tf.summary.scalar("avg_nn_distance", avg_distance, step = 0) # Overall embedding similarity quality
             tf.summary.scalar("processed_images", self.total_images, step = 0) # Total number of images processed in this run
 
-            summary_writer.flush() # Ensures data is visible when you open TensorBoard
+            summary_writer.flush() # Make sure data is visible when user opens TensorBoard
 
     def print_results(self):
         print("\n   ARCHIVIST RESULTS SUMMARY")

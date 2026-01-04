@@ -78,14 +78,15 @@ hierarchy_labels = [] # Stores parent class labels derived from folder structure
 
 # Walk through Dataset A
 for root, _, files in os.walk(datasetA):
+    rel = os.path.relpath(root, datasetA)
     for file in files:
         if file.lower().endswith((".png", ".jpg", ".jpeg")):
-            rel = os.path.relpath(root, datasetA)
-            top = rel.split(os.sep)[0] if rel != "." else None
-            parent_class = map_to_parent(top)
+            l_folder = os.path.basename(root) # Gets the current folder instead of only the top-level folder
+            parent_class = map_to_parent(l_folder) # Makes sure every folder is checked against the class_map
             if parent_class:
                 image_paths.append(os.path.join(root, file)) # Stores image path
                 hierarchy_labels.append(parent_class)
+# print(f"Detected class '{parent_class}' in folder '{l_folder}'") # For dubugging to check which folders are being detected
 
 class_names = sorted(set(hierarchy_labels)) # Unique parent-level class names
 class_to_index = {name: i for i, name in enumerate(class_names)} # Map each hierarchical class to a numeric index
