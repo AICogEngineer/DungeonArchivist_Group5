@@ -233,7 +233,7 @@ class Archivist:
         print("\n   ARCHIVIST RESULTS SUMMARY")
         print(f"In total processed: {self.total_images} images")
         print(f"Sent {self.restored_images} images to the Restored Archive")
-        print(f"Sent {self.review_images} images to the Review Pile")
+        print(f"Sent {self.review_images} images to the manual Review Pile")
         print(f"\nConfidently classified coverage: {(self.restored_images / self.total_images) * 100:.2f}%") # Percentage of images confidently classified
         print(f"Flagged for manual review rate: {(self.review_images / self.total_images) * 100:.2f}%") # Percentage of images flagged for manual review
         print(
