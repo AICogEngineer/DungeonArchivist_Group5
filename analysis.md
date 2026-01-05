@@ -309,4 +309,4 @@ The system improves as it absorbs cleanly sorted data.
 
 The Dungeon Archivist project shows that combining **embedding-based similarity** with careful **confidence gating** creates a reliable, automated asset sorting system.  
 By only classifying images when the model is confident and deferring uncertain cases to human review, the system **avoids costly mistakes** while gradually improving as more data is absorbed.
-This approach makes the Archivist both **practical and safe** for real-world use, allowing companies or studios to restore structure to chaotic asset collections efficiently and at scale.  
+This approach makes the Archivist both **practical and safe** for real-world use, allowing companies or studios to restore structure to chaotic asset collections efficiently and at scale.
